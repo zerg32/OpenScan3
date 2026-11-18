@@ -1,0 +1,84 @@
+{
+    "name": "OpenScan.eu Classic",
+    "model": "classic",
+    "shield": "greenshield",
+    "cameras": {
+        "Canon EOS M": {
+            "type": "gphoto2",
+            "path": "usb:001,006",
+            "settings": {
+                "shutter": 50.0,
+                "saturation": 1.0,
+                "contrast": 1.0,
+                "awbg_red": 1.8,
+                "awbg_blue": 1.8,
+                "gain": 1.0,
+                "jpeg_quality": 90,
+                "AF": true,
+                "AF_window": null,
+                "manual_focus": 12.0,
+                "crop_width": 10,
+                "crop_height": 10,
+                "orientation_flag": 8,
+                "preview_resolution": null,
+                "photo_resolution": null
+            }
+        }
+    },
+    "motors": {
+        "rotor": {
+            "direction_pin": 5,
+            "enable_pin": 23,
+            "step_pin": 6,
+            "backend": "marlin",
+            "marlin_axis": "X",
+            "marlin_port": "/dev/ttyUSB0",
+            "marlin_baudrate": 115200,
+            "marlin_max_feedrate": 600.0,
+            "acceleration": 20000,
+            "max_speed": 5000,
+            "direction": 1,
+            "steps_per_rotation": 17067,
+            "min_angle": 0.0,
+            "max_angle": 140.0,
+            "home_angle": 90.0
+        },
+        "turntable": {
+            "direction_pin": 9,
+            "enable_pin": 22,
+            "step_pin": 11,
+            "backend": "marlin",
+            "marlin_axis": "Y",
+            "marlin_port": "/dev/ttyUSB0",
+            "marlin_baudrate": 115200,
+            "marlin_max_feedrate": 600.0,
+            "acceleration": 5000,
+            "max_speed": 5000,
+            "direction": 1,
+            "steps_per_rotation": 3200,
+            "min_angle": 0.0,
+            "max_angle": 360.0,
+            "home_angle": 90.0
+        }
+    },
+    "lights": {
+        "OpenScan.eu Ringlight": {
+            "pin": null,
+            "pins": [
+                17,
+                27
+            ],
+            "pwm_support": true,
+            "pwm_frequency": 10000.0,
+            "pwm_min": 0.0,
+            "pwm_max": 3.3
+        }
+    },
+    "triggers": {},
+    "endstops": {},
+    "idle_timeout": 0.0,
+    "motors_timeout": 0.0,
+    "scan_radius_mm": 1.0,
+    "startup_mode": "startup_enabled",
+    "calibrate_mode": "calibrate_manual"
+}

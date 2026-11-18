@@ -199,6 +199,7 @@ class ScanTask(BaseTask):
             path_dict=path_dict,
             focus_context=focus_context,
         )
+        self._failed_captures: list[int] = []
 
         try:
             # Execute main scan loop
@@ -339,8 +340,13 @@ class ScanTask(BaseTask):
             try:
                 await self._capture_photos_at_position(current_point, original_index)
             except Exception as e:
-                logger.error("Error taking photo at position %s: %s", original_index, e, exc_info=True)
-                raise
+                logger.warning(
+                    "Skipping photo at position %s after capture error: %s",
+                    original_index,
+                    e,
+                    exc_info=True,
+                )
+                self._failed_captures.append(original_index)
 
             if self.is_cancelled():
                 logger.info(
@@ -370,13 +376,32 @@ class ScanTask(BaseTask):
         else:
             # Loop completed without break
             self._ctx.scan.status = TaskStatus.COMPLETED
-            logger.info(
-                "Scan %s for project %s completed successfully.",
-                self._ctx.scan.index,
-                self._ctx.scan.project_name,
-            )
-            self._task_model.result = f"Scan completed successfully after {total} steps."
-            yield TaskProgress(current=total, total=total, message="Scan completed successfully.")
+            skipped_count = len(self._failed_captures)
+            if skipped_count:
+                logger.warning(
+                    "Scan %s for project %s completed with %d skipped photo(s): %s",
+                    self._ctx.scan.index,
+                    self._ctx.scan.project_name,
+                    skipped_count,
+                    self._failed_captures,
+                )
+                self._task_model.result = (
+                    f"Scan completed with {skipped_count} skipped photo(s) "
+                    f"after {total} steps: {self._failed_captures}."
+                )
+                yield TaskProgress(
+                    current=total,
+                    total=total,
+                    message=f"Scan completed with {skipped_count} skipped photo(s).",
+                )
+            else:
+                logger.info(
+                    "Scan %s for project %s completed successfully.",
+                    self._ctx.scan.index,
+                    self._ctx.scan.project_name,
+                )
+                self._task_model.result = f"Scan completed successfully after {total} steps."
+                yield TaskProgress(current=total, total=total, message="Scan completed successfully.")
 
     async def _ensure_project_thumbnail(self, camera_controller: object, project_manager: ProjectManager, project_name: str) -> None:
         project = project_manager.get_project_by_name(project_name)
@@ -385,15 +410,38 @@ class ScanTask(BaseTask):
         if os.path.exists(thumbnail_path):
             return
 
-        preview_bytes = camera_controller.preview()
+        preview_bytes = None
+        try:
+            preview_bytes = camera_controller.preview()
+        except Exception:
+            logger.warning(
+                "Could not capture thumbnail preview for project '%s'; skipping thumbnail.",
+                project_name,
+                exc_info=True,
+            )
+            return
+        if not preview_bytes:
+            logger.warning(
+                "Thumbnail preview for project '%s' was empty; skipping thumbnail.",
+                project_name,
+            )
+            return
+
         orientation_flag = int(camera_controller.settings.orientation_flag or 1)
 
-        await asyncio.to_thread(
-            self._save_thumbnail_jpeg,
-            preview_bytes,
-            thumbnail_path,
-            orientation_flag,
-        )
+        try:
+            await asyncio.to_thread(
+                self._save_thumbnail_jpeg,
+                preview_bytes,
+                thumbnail_path,
+                orientation_flag,
+            )
+        except Exception:
+            logger.warning(
+                "Could not save thumbnail for project '%s'; continuing scan.",
+                project_name,
+                exc_info=True,
+            )
 
     @staticmethod
     def _save_thumbnail_jpeg(preview_bytes: bytes, thumbnail_path: str, orientation_flag: int) -> None:

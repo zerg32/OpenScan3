@@ -193,7 +193,9 @@ class GPhoto2Controller(CameraController):
         try:
             flag = int(orientation)
             exif_bytes = piexif.dump({"0th": {piexif.ImageIFD.Orientation: flag}})
-            return piexif.insert(exif_bytes, jpeg_bytes)
+            output = io.BytesIO()
+            piexif.insert(exif_bytes, jpeg_bytes, output)
+            return output.getvalue()
         except Exception as exc:
             logger.warning(
                 "Failed to embed orientation flag (%s) into gphoto2 JPEG: %s",

@@ -22,6 +22,11 @@ from openscan_firmware.controllers.hardware.interfaces import HardwareEvent, Sta
 from openscan_firmware.config.motor import MotorConfig
 from openscan_firmware.models.motor import Motor
 from openscan_firmware.controllers.hardware import gpio
+from openscan_firmware.controllers.hardware.marlin_motion import (
+    MarlinMotion,
+    marlin_feedrate,
+    marlin_move_timeout,
+)
 from openscan_firmware.controllers.settings import Settings
 from openscan_firmware.controllers.services.device_events import (
     notify_busy_change,
@@ -53,6 +58,8 @@ class MotorController(StatefulHardware, SleepCapableHardware):
         self._current_steps = 0
         self._target_angle = None
         self._stop_requested = False
+        self._marlin = None
+        self._marlin_key = None
         self.endstop = None
         
         # no idle callbacks
@@ -73,6 +80,24 @@ class MotorController(StatefulHardware, SleepCapableHardware):
         # update model settings
         self.model.settings = settings
 
+        if settings.backend == "marlin":
+            key = (settings.marlin_port, settings.marlin_baudrate)
+            if self._marlin is None or self._marlin_key != key:
+                if self._marlin is not None:
+                    self._marlin.release()
+                self._marlin = MarlinMotion.shared(*key)
+                self._marlin_key = key
+            logger.info(
+                f"Motor '{self.model.name}' uses Marlin serial backend on "
+                f"{settings.marlin_port} ({self._marlin_axis(settings)})."
+            )
+            return
+
+        if self._marlin is not None:
+            self._marlin.release()
+            self._marlin = None
+            self._marlin_key = None
+
         # apply to hardware
         gpio.initialize_output_pins([
             self.settings.direction_pin,
@@ -82,6 +107,22 @@ class MotorController(StatefulHardware, SleepCapableHardware):
         gpio.set_output_pin(self.settings.enable_pin, self.is_idle())
 
         logger.info(f"Motor '{self.model.name}' settings updated.")
+
+    def _uses_marlin(self) -> bool:
+        return self.settings.backend == "marlin"
+
+    def _marlin_axis(self, settings: MotorConfig | None = None) -> str:
+        settings = settings or self.settings.model
+        if settings.marlin_axis:
+            return settings.marlin_axis
+        axes = {"rotor": "X", "turntable": "Y"}
+        try:
+            return axes[self.model.name]
+        except KeyError:
+            raise ValueError(
+                f"Marlin axis is not configured for motor '{self.model.name}'"
+            ) from None
+
 
     def is_busy(self) -> bool:
         """Check if the motor is busy (moving)."""
@@ -106,6 +147,9 @@ class MotorController(StatefulHardware, SleepCapableHardware):
         return self.settings.model
 
     def refresh(self):
+        if self._uses_marlin():
+            logger.info(f"Motor '{self.model.name}' uses Marlin backend; nothing to refresh.")
+            return
         if self.is_idle():
             logger.info(f"Motor '{self.model.name}' idle.")
             self._calibrated = False
@@ -124,7 +168,15 @@ class MotorController(StatefulHardware, SleepCapableHardware):
     def stop(self) -> None:
         """Request to stop the current motor movement."""
         self._stop_requested = True
+        if self._marlin is not None:
+            self._marlin.request_stop()
         logger.info(f"Motor '{self.model.name}' stop requested.")
+
+    def cleanup(self) -> None:
+        if self._marlin is not None:
+            self._marlin.release()
+            self._marlin = None
+            self._marlin_key = None
 
     def _normalize_target_angle(self, desired_angle: float) -> float:
         """Normalize the target angle to the range [min_angle, max_angle].
@@ -418,6 +470,82 @@ class MotorController(StatefulHardware, SleepCapableHardware):
         return step_times
 
     async def _execute_movement(self, step_count: int, requested_degrees: float) -> int:
+        """Dispatch a movement to the configured backend."""
+        if self._uses_marlin():
+            return await self._execute_marlin_movement(step_count)
+        return await self._execute_gpio_movement(step_count, requested_degrees)
+
+    def _marlin_feedrate(self, settings: MotorConfig) -> float:
+        return marlin_feedrate(
+            settings.steps_per_rotation,
+            settings.max_speed,
+            settings.marlin_max_feedrate,
+        )
+
+    def _marlin_timeout(
+        self, settings: MotorConfig, step_count: int, feedrate: float | None = None
+    ) -> float:
+        if feedrate is None:
+            feedrate = self._marlin_feedrate(settings)
+        return marlin_move_timeout(step_count, settings.steps_per_rotation, feedrate)
+
+    async def _execute_marlin_movement(self, step_count: int) -> int:
+        """Execute a movement on the Marlin controller."""
+        logger.debug("_execute_marlin_movement")
+
+        if self.is_idle():
+            logger.debug("Device idle, must exit before")
+            await self.send_event(HardwareEvent.MOVE_EVENT)
+
+        async with inactivity_timer_paused:
+
+            self._current_steps = abs(step_count)
+            notify_busy_change("motors", self.model.name)
+
+            settings = self.settings.model
+            axis = self._marlin_axis(settings)
+            feedrate = self._marlin_feedrate(settings)
+            timeout = self._marlin_timeout(settings, step_count, feedrate)
+            if self._marlin is None:
+                key = (settings.marlin_port, settings.marlin_baudrate)
+                self._marlin = MarlinMotion.shared(*key)
+                self._marlin_key = key
+
+            def do_movement() -> int:
+                if step_count == 0:
+                    return 0
+                return self._marlin.move_steps(
+                    axis,
+                    step_count,
+                    settings.steps_per_rotation,
+                    feedrate,
+                    settings.marlin_port,
+                    settings.marlin_baudrate,
+                    timeout=timeout,
+                )
+
+            try:
+                actual_executed_steps = await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    do_movement
+                )
+
+                spr = settings.steps_per_rotation
+                dir_multiplier = 1 if step_count >= 0 else -1
+                executed_degrees = (actual_executed_steps / spr * 360) * dir_multiplier * settings.direction
+
+                self.model.angle = (self.model.angle + executed_degrees) % 360
+                logger.debug(f"Motor {self.model.name} moved {executed_degrees:.2f} degrees via Marlin.")
+            except asyncio.CancelledError:
+                logger.info(f"Motor {self.model.name} movement cancelled.")
+                raise
+            finally:
+                # CRITICAL: Always reset busy state, even if cancelled
+                self._current_steps = 0
+                self._target_angle = None
+                notify_busy_change("motors", self.model.name)
+
+    async def _execute_gpio_movement(self, step_count: int, requested_degrees: float) -> int:
         """Execute the movement using pre-calculated step timings
         Args:
             step_count: Number of steps to move"""

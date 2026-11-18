@@ -7,6 +7,22 @@ class MotorConfig(BaseModel):
     enable_pin: int = Field(description="GPIO pin toggling the motor driver enable line.")
     step_pin: int = Field(description="GPIO pin used to emit step pulses.")
 
+    backend: Literal["gpio", "marlin"] = Field(
+        "gpio", description="Motion backend used to drive this motor."
+    )
+    marlin_axis: Literal["X", "Y"] | None = Field(
+        None, description="Marlin axis for this motor; inferred from the motor name when omitted."
+    )
+    marlin_port: str = Field(
+        "/dev/ttyUSB0", description="Serial device of the Marlin controller."
+    )
+    marlin_baudrate: int = Field(
+        115200, ge=9600, le=1000000, description="Baud rate of the Marlin controller."
+    )
+    marlin_max_feedrate: float = Field(
+        600.0, gt=0, le=18000, description="Maximum Marlin feedrate in degrees per minute."
+    )
+
     acceleration: int = Field(20000, ge=1000, le=80000, description="Acceleration in steps/s², Limits tested on Rpi 4 2GB under full load --> time estimation within 0.5%")
     max_speed: int = Field(5000, ge=1, le=7500, description="Steps per second, Limits tested on RPi 4 2GB under full load --> time estimation within 0.5%")
 

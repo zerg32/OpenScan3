@@ -47,6 +47,8 @@ class GPhoto2Session:
         self._identity = CameraIdentity(model=model_hint, port=camera_path)
         self._io_retry_attempts = 3
         self._io_retry_delay_s = 0.08
+        self._capture_retry_attempts = 3
+        self._capture_retry_delay_s = 0.5
 
     @property
     def identity(self) -> CameraIdentity:
@@ -107,30 +109,51 @@ class GPhoto2Session:
         camera_file = gp.gp_camera_capture_preview(camera)[1]
         return bytes(camera_file.get_data_and_size())
 
+    @staticmethod
+    def _is_unspecified_error(exc: Exception) -> bool:
+        message = str(exc)
+        return "Unspecified error" in message or "[-1]" in message
+
     def capture_image(self, gp_file_type: int = gp.GP_FILE_TYPE_NORMAL) -> tuple[bytes, dict[str, Any]]:
-        camera = self.ensure_connected()
-        try:
-            file_path = camera.capture(gp.GP_CAPTURE_IMAGE)
-        except Exception as exc:
-            message = str(exc)
-            # Nikon (and some other DSLRs) can fail with "Unspecified error"
-            # on camera.capture(), but succeed via trigger + event polling.
-            if "Unspecified error" in message or "[-1]" in message:
-                logger.debug(
-                    "camera.capture failed with '%s'; trying trigger-capture fallback.",
-                    message,
-                )
-                file_path = self._trigger_capture_and_wait_for_file(camera)
-            else:
-                raise
-        camera_file = camera.file_get(file_path.folder, file_path.name, gp_file_type)
-        payload = bytes(camera_file.get_data_and_size())
-        metadata = {
-            "capture_folder": file_path.folder,
-            "capture_name": file_path.name,
-            "gp_file_type": gp_file_type,
-        }
-        return payload, metadata
+        last_error: Exception | None = None
+        for attempt in range(self._capture_retry_attempts):
+            camera = self.ensure_connected()
+            try:
+                try:
+                    file_path = camera.capture(gp.GP_CAPTURE_IMAGE)
+                except Exception as exc:
+                    if not self._is_unspecified_error(exc):
+                        raise
+                    logger.debug(
+                        "camera.capture failed with '%s'; trying trigger-capture fallback.",
+                        exc,
+                    )
+                    file_path = self._trigger_capture_and_wait_for_file(camera)
+                camera_file = camera.file_get(file_path.folder, file_path.name, gp_file_type)
+                payload = bytes(camera_file.get_data_and_size())
+                metadata = {
+                    "capture_folder": file_path.folder,
+                    "capture_name": file_path.name,
+                    "gp_file_type": gp_file_type,
+                }
+                return payload, metadata
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < self._capture_retry_attempts:
+                    logger.warning(
+                        "gphoto2 capture attempt %s/%s failed: %s; reconnecting and retrying.",
+                        attempt + 1,
+                        self._capture_retry_attempts,
+                        exc,
+                    )
+                    self.close()
+                    time.sleep(self._capture_retry_delay_s * (2**attempt))
+                else:
+                    logger.debug("Final gphoto2 capture attempt failed.", exc_info=True)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("gphoto2 capture failed.")
 
     def trigger_capture_and_wait_for_file(self, timeout_s: float = 12.0):
         camera = self.ensure_connected()
